@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Theremin - 手势交互</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+  }
+  h1 {
+    margin-top: 16px;
+    font-size: 24px;
+    font-weight: 300;
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    color: #7fdbca;
+  }
+  .container {
+    position: relative;
+    margin-top: 12px;
+    border: 2px solid #1a3a3a;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 0 40px rgba(127, 219, 202, 0.1);
+  }
+  video, canvas {
+    display: block;
+    width: 640px;
+    height: 480px;
+  }
+  video { display: none; }
+  canvas { background: #000; }
+  .overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.7));
+    pointer-events: none;
+  }
+  .info {
+    font-size: 14px;
+    font-family: 'Courier New', monospace;
+  }
+  .info-left { color: #ff79c6; }
+  .info-right { color: #8be9fd; }
+  #startBtn {
+    margin-top: 16px;
+    padding: 12px 48px;
+    font-size: 16px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    background: transparent;
+    color: #7fdbca;
+    border: 1px solid #7fdbca;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.3s;
+  }
+  #startBtn:hover {
+    background: #7fdbca;
+    color: #0a0a0f;
+  }
+  #startBtn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .hint {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #555;
+    text-align: center;
+    line-height: 1.8;
+  }
+  #status {
+    margin-top: 8px;
+    font-size: 13px;
+    color: #ff7979;
+    min-height: 20px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Theremin</h1>
+
+<div class="container">
+  <video id="video" playsinline></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div class="overlay">
+    <div class="info info-left" id="leftInfo">左手: --</div>
+    <div class="info info-right" id="rightInfo">右手: --</div>
+  </div>
+</div>
+
+<button id="startBtn">开始演奏</button>
+<div class="hint">
+  右手上下移动控制音高 · 左手上下移动控制音量 · 移开双手静音
+</div>
+<div id="status"></div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+const leftInfo = document.getElementById('leftInfo');
+const rightInfo = document.getElementById('rightInfo');
+const statusEl = document.getElementById('status');
+
+let audioCtx, oscillator, gainNode;
+const SMOOTH = 0.15;
+let currentFreq = 440;
+let currentGain = 0;
+
+function initAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  oscillator = audioCtx.createOscillator();
+  gainNode = audioCtx.createGain();
+  oscillator.type = 'sine';
+  oscillator.frequency.value = 440;
+  gainNode.gain.value = 0;
+  oscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  oscillator.start();
+}
+
+function mapRange(value, inMin, inMax, outMin, outMax) {
+  return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
+}
+
+function clamp(val, min, max) {
+  return Math.max(min, Math.min(max, val));
+}
+
+function smooth(current, target, factor) {
+  return current + (target - current) * factor;
+}
+
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [0,9],[9,10],[10,11],[11,12],
+  [0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],
+  [5,9],[9,13],[13,17]
+];
+
+function drawHand(landmarks, color) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  for (const [i, j] of CONNECTIONS) {
+    const a = landmarks[i];
+    const b = landmarks[j];
+    ctx.beginPath();
+    ctx.moveTo(a.x * canvas.width, a.y * canvas.height);
+    ctx.lineTo(b.x * canvas.width, b.y * canvas.height);
+    ctx.stroke();
+  }
+  ctx.fillStyle = color;
+  for (const idx of [4, 8, 12, 16, 20]) {
+    const lm = landmarks[idx];
+    ctx.beginPath();
+    ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 5, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+  const tip = landmarks[8];
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(tip.x * canvas.width, tip.y * canvas.height, 10, 0, 2 * Math.PI);
+  ctx.stroke();
+}
+
+function onResults(results) {
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.translate(canvas.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  let leftY = null;
+  let rightY = null;
+
+  if (results.multiHandLandmarks && results.multiHandedness) {
+    for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+      const landmarks = results.multiHandLandmarks[i];
+      const label = results.multiHandedness[i].label;
+
+      if (label === 'Right') {
+        rightY = landmarks[8].y;
+        ctx.save();
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        drawHand(landmarks, 'rgba(139, 233, 253, 0.8)');
+        ctx.restore();
+      } else {
+        leftY = landmarks[8].y;
+        ctx.save();
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        drawHand(landmarks, 'rgba(255, 121, 198, 0.8)');
+        ctx.restore();
+      }
+    }
+  }
+
+  if (audioCtx) {
+    const now = audioCtx.currentTime;
+    const rampTime = 0.08;
+
+    if (rightY !== null) {
+      const targetFreq = mapRange(rightY, 1, 0, 200, 1500);
+      currentFreq = smooth(currentFreq, targetFreq, SMOOTH);
+      oscillator.frequency.linearRampToValueAtTime(currentFreq, now + rampTime);
+    }
+
+    if (leftY !== null) {
+      const targetGain = mapRange(leftY, 1, 0, 0, 0.8);
+      currentGain = smooth(currentGain, targetGain, SMOOTH);
+    } else if (rightY !== null) {
+      currentGain = smooth(currentGain, 0.4, SMOOTH);
+    } else {
+      currentGain = smooth(currentGain, 0, SMOOTH);
+    }
+
+    gainNode.gain.linearRampToValueAtTime(clamp(currentGain, 0, 0.8), now + rampTime);
+  }
+
+  if (leftY !== null) {
+    const vol = Math.round(mapRange(leftY, 1, 0, 0, 100));
+    leftInfo.textContent = '左手: 音量 ' + clamp(vol, 0, 100) + '%';
+  } else {
+    leftInfo.textContent = '左手: --';
+  }
+
+  if (rightY !== null) {
+    rightInfo.textContent = '右手: ' + Math.round(currentFreq) + ' Hz';
+  } else {
+    rightInfo.textContent = '右手: --';
+  }
+}
+
+// Async script loader
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.crossOrigin = 'anonymous';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function loadDeps() {
+  statusEl.textContent = '正在加载模型...';
+  try {
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
+  } catch (e) {
+    statusEl.textContent = 'jsdelivr CDN 加载失败，尝试备用 CDN...';
+    try {
+      await loadScript('https://unpkg.com/@mediapipe/hands/hands.js');
+      await loadScript('https://unpkg.com/@mediapipe/camera_utils/camera_utils.js');
+    } catch (e2) {
+      statusEl.textContent = '模型加载失败，请检查网络连接后刷新页面';
+      startBtn.disabled = true;
+      return false;
+    }
+  }
+  statusEl.textContent = '';
+  return true;
+}
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = '加载中...';
+
+  const loaded = await loadDeps();
+  if (!loaded) return;
+
+  initAudio();
+
+  const hands = new Hands({
+    locateFile: (file) => 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/' + file
+  });
+
+  hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.5
+  });
+
+  hands.onResults(onResults);
+
+  const camera = new Camera(video, {
+    onFrame: async () => {
+      await hands.send({ image: video });
+    },
+    width: 640,
+    height: 480
+  });
+
+  await camera.start();
+  statusEl.textContent = '';
+  startBtn.textContent = '演奏中...';
+});
+</script>
+</body>
+</html>
