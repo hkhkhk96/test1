@@ -110,7 +110,10 @@
 </div>
 <div id="status"></div>
 
-<script>
+<script type="module">
+import { HandLandmarker, FilesetResolver, DrawingUtils } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs";
+
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -118,6 +121,7 @@ const startBtn = document.getElementById('startBtn');
 const leftInfo = document.getElementById('leftInfo');
 const rightInfo = document.getElementById('rightInfo');
 const statusEl = document.getElementById('status');
+const drawingUtils = new DrawingUtils(ctx);
 
 let audioCtx, oscillator, gainNode;
 const SMOOTH = 0.15;
@@ -148,179 +152,156 @@ function smooth(current, target, factor) {
   return current + (target - current) * factor;
 }
 
-const CONNECTIONS = [
-  [0,1],[1,2],[2,3],[3,4],
-  [0,5],[5,6],[6,7],[7,8],
-  [0,9],[9,10],[10,11],[11,12],
-  [0,13],[13,14],[14,15],[15,16],
-  [0,17],[17,18],[18,19],[19,20],
-  [5,9],[9,13],[13,17]
-];
-
-function drawHand(landmarks, color) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  for (const [i, j] of CONNECTIONS) {
-    const a = landmarks[i];
-    const b = landmarks[j];
-    ctx.beginPath();
-    ctx.moveTo(a.x * canvas.width, a.y * canvas.height);
-    ctx.lineTo(b.x * canvas.width, b.y * canvas.height);
-    ctx.stroke();
-  }
-  ctx.fillStyle = color;
-  for (const idx of [4, 8, 12, 16, 20]) {
-    const lm = landmarks[idx];
-    ctx.beginPath();
-    ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 5, 0, 2 * Math.PI);
-    ctx.fill();
-  }
-  const tip = landmarks[8];
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(tip.x * canvas.width, tip.y * canvas.height, 10, 0, 2 * Math.PI);
-  ctx.stroke();
-}
-
-function onResults(results) {
-  ctx.save();
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.translate(canvas.width, 0);
-  ctx.scale(-1, 1);
-  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
-  ctx.restore();
-
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  let leftY = null;
-  let rightY = null;
-
-  if (results.multiHandLandmarks && results.multiHandedness) {
-    for (let i = 0; i < results.multiHandLandmarks.length; i++) {
-      const landmarks = results.multiHandLandmarks[i];
-      const label = results.multiHandedness[i].label;
-
-      if (label === 'Right') {
-        rightY = landmarks[8].y;
-        ctx.save();
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
-        drawHand(landmarks, 'rgba(139, 233, 253, 0.8)');
-        ctx.restore();
-      } else {
-        leftY = landmarks[8].y;
-        ctx.save();
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
-        drawHand(landmarks, 'rgba(255, 121, 198, 0.8)');
-        ctx.restore();
-      }
-    }
-  }
-
-  if (audioCtx) {
-    const now = audioCtx.currentTime;
-    const rampTime = 0.08;
-
-    if (rightY !== null) {
-      const targetFreq = mapRange(rightY, 1, 0, 200, 1500);
-      currentFreq = smooth(currentFreq, targetFreq, SMOOTH);
-      oscillator.frequency.linearRampToValueAtTime(currentFreq, now + rampTime);
-    }
-
-    if (leftY !== null) {
-      const targetGain = mapRange(leftY, 1, 0, 0, 0.8);
-      currentGain = smooth(currentGain, targetGain, SMOOTH);
-    } else if (rightY !== null) {
-      currentGain = smooth(currentGain, 0.4, SMOOTH);
-    } else {
-      currentGain = smooth(currentGain, 0, SMOOTH);
-    }
-
-    gainNode.gain.linearRampToValueAtTime(clamp(currentGain, 0, 0.8), now + rampTime);
-  }
-
-  if (leftY !== null) {
-    const vol = Math.round(mapRange(leftY, 1, 0, 0, 100));
-    leftInfo.textContent = '左手: 音量 ' + clamp(vol, 0, 100) + '%';
-  } else {
-    leftInfo.textContent = '左手: --';
-  }
-
-  if (rightY !== null) {
-    rightInfo.textContent = '右手: ' + Math.round(currentFreq) + ' Hz';
-  } else {
-    rightInfo.textContent = '右手: --';
-  }
-}
-
-// Async script loader
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src;
-    s.crossOrigin = 'anonymous';
-    s.onload = resolve;
-    s.onerror = () => reject(new Error('Failed to load: ' + src));
-    document.head.appendChild(s);
-  });
-}
-
-async function loadDeps() {
-  statusEl.textContent = '正在加载模型...';
-  try {
-    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js');
-    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
-  } catch (e) {
-    statusEl.textContent = 'jsdelivr CDN 加载失败，尝试备用 CDN...';
-    try {
-      await loadScript('https://unpkg.com/@mediapipe/hands/hands.js');
-      await loadScript('https://unpkg.com/@mediapipe/camera_utils/camera_utils.js');
-    } catch (e2) {
-      statusEl.textContent = '模型加载失败，请检查网络连接后刷新页面';
-      startBtn.disabled = true;
-      return false;
-    }
-  }
-  statusEl.textContent = '';
-  return true;
-}
+let handLandmarker = null;
 
 startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
   startBtn.textContent = '加载中...';
 
-  const loaded = await loadDeps();
-  if (!loaded) return;
+  try {
+    statusEl.textContent = '正在加载模型...';
 
-  initAudio();
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
+    );
 
-  const hands = new Hands({
-    locateFile: (file) => 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/' + file
-  });
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO",
+      numHands: 2
+    });
 
-  hands.setOptions({
-    maxNumHands: 2,
-    modelComplexity: 1,
-    minDetectionConfidence: 0.7,
-    minTrackingConfidence: 0.5
-  });
+    statusEl.textContent = '正在启动摄像头...';
 
-  hands.onResults(onResults);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }
+    });
+    video.srcObject = stream;
+    await video.play();
 
-  const camera = new Camera(video, {
-    onFrame: async () => {
-      await hands.send({ image: video });
-    },
-    width: 640,
-    height: 480
-  });
+    initAudio();
+    statusEl.textContent = '';
+    startBtn.textContent = '演奏中...';
 
-  await camera.start();
-  statusEl.textContent = '';
-  startBtn.textContent = '演奏中...';
+    let lastTime = -1;
+
+    function detect() {
+      if (video.currentTime === lastTime) {
+        requestAnimationFrame(detect);
+        return;
+      }
+      lastTime = video.currentTime;
+
+      const results = handLandmarker.detectForVideo(video, performance.now());
+
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Mirror the video
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      let leftY = null;
+      let rightY = null;
+
+      if (results.landmarks && results.handedness) {
+        for (let i = 0; i < results.landmarks.length; i++) {
+          const landmarks = results.landmarks[i];
+          const category = results.handedness[i][0];
+          // handedness[0].categoryName: "Left" or "Right"
+          // This is from the model's perspective (mirrored).
+          // When display is mirrored, model's "Right" = user's right hand.
+          const label = category.categoryName;
+
+          // Draw skeleton (mirrored)
+          ctx.save();
+          ctx.translate(canvas.width, 0);
+          ctx.scale(-1, 1);
+
+          const color = label === 'Right'
+            ? 'rgba(139, 233, 253, 0.8)'
+            : 'rgba(255, 121, 198, 0.8)';
+
+          drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
+            color: color, lineWidth: 2
+          });
+          drawingUtils.drawLandmarks(landmarks, {
+            color: color, lineWidth: 1, radius: 3
+          });
+
+          // Highlight index fingertip
+          const tip = landmarks[8];
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(tip.x * canvas.width, tip.y * canvas.height, 10, 0, 2 * Math.PI);
+          ctx.stroke();
+
+          ctx.restore();
+
+          if (label === 'Right') {
+            rightY = landmarks[8].y;
+          } else {
+            leftY = landmarks[8].y;
+          }
+        }
+      }
+
+      // Audio control
+      if (audioCtx) {
+        const now = audioCtx.currentTime;
+        const rampTime = 0.08;
+
+        if (rightY !== null) {
+          const targetFreq = mapRange(rightY, 1, 0, 200, 1500);
+          currentFreq = smooth(currentFreq, targetFreq, SMOOTH);
+          oscillator.frequency.linearRampToValueAtTime(currentFreq, now + rampTime);
+        }
+
+        if (leftY !== null) {
+          const targetGain = mapRange(leftY, 1, 0, 0, 0.8);
+          currentGain = smooth(currentGain, targetGain, SMOOTH);
+        } else if (rightY !== null) {
+          currentGain = smooth(currentGain, 0.4, SMOOTH);
+        } else {
+          currentGain = smooth(currentGain, 0, SMOOTH);
+        }
+
+        gainNode.gain.linearRampToValueAtTime(clamp(currentGain, 0, 0.8), now + rampTime);
+      }
+
+      // Info display
+      if (leftY !== null) {
+        const vol = Math.round(mapRange(leftY, 1, 0, 0, 100));
+        leftInfo.textContent = '左手: 音量 ' + clamp(vol, 0, 100) + '%';
+      } else {
+        leftInfo.textContent = '左手: --';
+      }
+
+      if (rightY !== null) {
+        rightInfo.textContent = '右手: ' + Math.round(currentFreq) + ' Hz';
+      } else {
+        rightInfo.textContent = '右手: --';
+      }
+
+      requestAnimationFrame(detect);
+    }
+
+    detect();
+
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = '启动失败: ' + e.message;
+    startBtn.disabled = false;
+    startBtn.textContent = '开始演奏';
+  }
 });
 </script>
 </body>
